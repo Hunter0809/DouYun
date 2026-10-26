@@ -158,14 +158,14 @@ async function searchWeb(query: string, requestSignal: AbortSignal): Promise<Arr
 
   const providers = [
     {
-      name: "Bing",
-      url: `https://www.bing.com/search?q=${encodeURIComponent(normalizedQuery)}&setlang=zh-hans&cc=CN`,
-      parse: parseBingResults,
-    },
-    {
       name: "DuckDuckGo Lite",
       url: `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(normalizedQuery)}`,
       parse: parseDuckDuckGoLiteResults,
+    },
+    {
+      name: "Bing",
+      url: `https://www.bing.com/search?q=${encodeURIComponent(normalizedQuery)}&setlang=zh-hans&cc=CN`,
+      parse: parseBingResults,
     },
   ];
   const failures: string[] = [];
