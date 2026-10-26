@@ -36,14 +36,14 @@ const WEB_SEARCH_TOOL = {
   type: "function",
   function: {
     name: "web_search",
-    description: "Search the public web for current facts, recent changes, or sources requested by the user.",
+    description: "Search the live public web for the exact topic the user asks about. Preserve named entities, locations, and years in the query.",
     parameters: {
       type: "object",
       properties: {
         query: {
           type: "string",
           description: "A concise search query, preferably in the language of the user's question.",
-          maxLength: 200,
+          maxLength: 128,
         },
       },
       required: ["query"],
@@ -130,156 +130,70 @@ function normalizeDeepSeekModel(selected: string): string {
   return configured && allowedModels.includes(configured) ? configured : "deepseek-v4-flash";
 }
 
-function decodeHtml(value: string): string {
-  return value
-    .replace(/<[^>]*>/g, "")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;|&#x27;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&#(\d+);/g, (_, code: string) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([\da-f]+);/gi, (_, code: string) => String.fromCodePoint(parseInt(code, 16)))
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function resolveSearchUrl(href: string): string | null {
-  try {
-    const parsed = new URL(href.replace(/&amp;/g, "&"), "https://html.duckduckgo.com");
-    const destination = parsed.searchParams.get("uddg") ?? parsed.href;
-    const url = new URL(destination);
-    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
-  } catch {
-    return null;
-  }
-}
-
-async function searchWeb(query: string, requestSignal: AbortSignal): Promise<Array<{ title: string; url: string; snippet: string }>> {
-  const normalizedQuery = query.trim().slice(0, 200);
-  if (!normalizedQuery) throw new Error("搜索关键词不能为空。");
-  const searchQuery = buildSearchQuery(normalizedQuery);
-
-  const providers = [
-    {
-      name: "DuckDuckGo Lite",
-      url: `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(searchQuery)}`,
-      parse: parseDuckDuckGoLiteResults,
-    },
-    {
-      name: "Bing",
-      url: `https://www.bing.com/search?q=${encodeURIComponent(searchQuery)}&setlang=en-us&cc=US`,
-      parse: parseBingResults,
-    },
-  ];
-  const failures: string[] = [];
-
-  for (const provider of providers) {
-    try {
-      const response = await fetch(provider.url, {
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; DouYunAI/1.0)", Accept: "text/html" },
-        signal: AbortSignal.any([requestSignal, AbortSignal.timeout(8_000)]),
-      });
-      if (!response.ok) {
-        failures.push(`${provider.name} 返回 ${response.status}`);
-        continue;
-      }
-      const results = provider.parse(await response.text())
-        .filter((result) => isSearchResultRelevant(normalizedQuery, result));
-      if (results.length > 0) return results;
-      failures.push(`${provider.name} 未返回相关结果`);
-    } catch (error) {
-      if (requestSignal.aborted) throw error;
-      failures.push(`${provider.name} 请求失败`);
-    }
-  }
-
-  throw new Error(`网页搜索未找到与“${normalizedQuery}”相关的可靠结果（${failures.join("；")}），请改写关键词后重试。`);
-}
-
-function buildSearchQuery(query: string): string {
-  const includesApec = /\bapec\b|亚太经合组织/i.test(query);
-  const includesShenzhen = /深圳|shenzhen/i.test(query);
-  if (!includesApec || !includesShenzhen) return query;
-
-  const year = query.match(/\b20\d{2}\b/)?.[0] ?? getCurrentDateInChina().slice(0, 4);
-  const event = /ceo|工商|企业家|商业/i.test(query) ? "APEC CEO Summit" : "APEC Economic Leaders Meeting";
-  return `${query} Shenzhen APEC ${year} ${event} dates official`;
-}
-
-function getSearchTerms(query: string): string[] {
-  const withoutQuestionWords = query.toLocaleLowerCase().replace(
-    /什么时候|哪一天|几月几日|几号|请问|请|帮我|联网|搜索|查询|查找|最新|目前|现在|今天|今日|有关|相关|信息|内容|详情|是什么|概括|总结|介绍|在哪里|在哪|时间|日期|举办|举行|召开|领导人|非正式|会议|峰会|将会|将|会|在|的|吗|呢|一下|when|what|where|date|dates|time|today|latest|current|official|search|find|meeting|summit|event/gi,
-    " ",
-  );
-  const pieces = withoutQuestionWords.match(/[a-z0-9]+(?:[.+#-][a-z0-9]+)*|[\u3400-\u9fff]{2,}/g) ?? [];
-  return Array.from(new Set(pieces.filter((piece) => piece.length > 1)));
-}
-
-function isSearchResultRelevant(
+async function searchWeb(
   query: string,
-  result: { title: string; url: string; snippet: string },
-): boolean {
-  const terms = getSearchTerms(query);
-  if (terms.length === 0) return true;
+  originalQuestion: string,
+  requestSignal: AbortSignal,
+): Promise<Array<{ title: string; url: string; snippet: string; summary: string; score: number; authority: number; date: string | null }>> {
+  const normalizedQuery = query.trim().slice(0, 128);
+  if (!normalizedQuery) throw new Error("搜索关键词不能为空。");
 
-  const searchable = `${result.title} ${result.url} ${result.snippet}`.toLocaleLowerCase();
-  const matches = terms.filter((term) => {
-    if (term === "深圳") return searchable.includes("深圳") || searchable.includes("shenzhen");
-    if (term === "中国") return searchable.includes("中国") || searchable.includes("china");
-    return searchable.includes(term);
+  const apiKey = firstConfiguredValue(process.env.DEEPSEEK_API_KEY);
+  if (!apiKey) throw new Error("实时搜索不可用：未配置 DeepSeek Search API 凭据。");
+
+  const question = originalQuestion.trim().slice(0, 128);
+  const response = await fetch("https://api.deepseek.com/v1/tools/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      query: normalizedQuery,
+      count: 10,
+      ...(question ? { ori_question: question } : {}),
+      need_content: true,
+    }),
+    signal: AbortSignal.any([requestSignal, AbortSignal.timeout(25_000)]),
   });
-  const mustMatch = terms.filter((term) => term === "apec" || term === "深圳");
-  const minimumMatches = Math.max(1, Math.ceil(terms.length / 2));
-  return matches.length >= minimumMatches && mustMatch.every((term) => matches.includes(term));
-}
 
-function toSearchResults(
-  links: Array<{ title: string; url: string }>,
-  snippets: string[],
-): Array<{ title: string; url: string; snippet: string }> {
-  return links.slice(0, 5).map((link, index) => ({
-    title: link.title.slice(0, 200),
-    url: link.url,
-    snippet: (snippets[index] ?? "").slice(0, 500),
-  }));
-}
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(formatUpstreamError(detail, `实时搜索请求失败（HTTP ${response.status}）`));
+  }
 
-function parseBingResults(html: string): Array<{ title: string; url: string; snippet: string }> {
-  const links: Array<{ title: string; url: string }> = [];
-  const snippets: string[] = [];
-  for (const match of html.matchAll(/<li\b([^>]*)>([\s\S]*?)<\/li>/gi)) {
-    if (!/\bb_algo\b/.test(match[1])) continue;
-    const block = match[2];
-    const titleMatch = block.match(/<h2[^>]*>\s*<a\b([^>]*)>([\s\S]*?)<\/a>\s*<\/h2>/i);
-    const href = titleMatch?.[1].match(/\bhref=["']([^"']+)["']/i)?.[1];
-    const url = href ? resolveSearchUrl(href) : null;
-    const title = titleMatch ? decodeHtml(titleMatch[2]) : "";
-    if (!url || !title) continue;
-    links.push({ title, url });
-    snippets.push(decodeHtml(block.match(/<p\b[^>]*>([\s\S]*?)<\/p>/i)?.[1] ?? ""));
-  }
-  return toSearchResults(links, snippets);
-}
+  const payload = asRecord(await response.json().catch(() => null));
+  const rawResults = Array.isArray(payload?.results) ? payload.results : [];
+  const results = rawResults.flatMap((item) => {
+    const record = asRecord(item);
+    if (!record || typeof record.title !== "string" || typeof record.url !== "string") return [];
+    const score = typeof record.rerank_score === "number" ? record.rerank_score : 0;
+    if (score < 1.5) return [];
 
-function parseDuckDuckGoLiteResults(html: string): Array<{ title: string; url: string; snippet: string }> {
-  const links: Array<{ title: string; url: string }> = [];
-  const snippets: string[] = [];
-  for (const match of html.matchAll(/<a\b([^>]+)>([\s\S]*?)<\/a>/gi)) {
-    const attrs = match[1];
-    const className = attrs.match(/\bclass=["']([^"']+)["']/i)?.[1] ?? "";
-    if (!/\bresult-link\b/.test(className)) continue;
-    const href = attrs.match(/\bhref=["']([^"']+)["']/i)?.[1];
-    const url = href ? resolveSearchUrl(href) : null;
-    const title = decodeHtml(match[2]);
-    if (url && title) links.push({ title, url });
+    try {
+      const url = new URL(record.url);
+      if (url.protocol !== "https:" && url.protocol !== "http:") return [];
+      const snippet = typeof record.snippet === "string" ? record.snippet.trim() : "";
+      const summary = typeof record.summary === "string" ? record.summary.trim() : "";
+      const content = typeof record.content === "string" ? record.content.trim() : "";
+      return [{
+        title: record.title.trim().slice(0, 240),
+        url: url.href,
+        snippet: snippet.slice(0, 600),
+        summary: (summary || content || snippet).slice(0, 1800),
+        score,
+        authority: typeof record.authority === "number" ? record.authority : -1,
+        date: typeof record.date === "string" ? record.date : null,
+      }];
+    } catch {
+      return [];
+    }
+  }).sort((a, b) => b.score - a.score || b.authority - a.authority).slice(0, 6);
+
+  if (results.length === 0) {
+    throw new Error(`实时搜索未找到与“${normalizedQuery}”相关的高质量结果，请换一种关键词再试。`);
   }
-  for (const match of html.matchAll(/<td\b([^>]+)>([\s\S]*?)<\/td>/gi)) {
-    const className = match[1].match(/\bclass=["']([^"']+)["']/i)?.[1] ?? "";
-    if (/\bresult-snippet\b/.test(className)) snippets.push(decodeHtml(match[2]));
-  }
-  return toSearchResults(links, snippets);
+  return results;
 }
 
 type ProviderStreamResult = { content: string; toolCalls: ToolCall[] };
@@ -509,7 +423,7 @@ async function handleTextChat(
                 try {
                   const args = JSON.parse(toolCall.function.arguments) as { query?: unknown };
                   if (typeof args.query !== "string") throw new Error("搜索关键词格式无效。");
-                  toolResult = await searchWeb(args.query, requestDeadline);
+                  toolResult = await searchWeb(args.query, getLatestUserPrompt(messages), requestDeadline);
                 } catch (error) {
                   emit({
                     type: "error",
