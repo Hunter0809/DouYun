@@ -37,7 +37,10 @@ type Props = {
 
 type EnvConfig = {
   configured: boolean;
-  baseUrl: string;
+  textConfigured: boolean;
+  imageConfigured: boolean;
+  textBaseUrl: string;
+  imageBaseUrl: string;
   defaultImageModel: string;
   defaultTextModel: string;
   defaultVisionModel?: string;
@@ -112,12 +115,13 @@ export default function ProfilePage({ onBack, onRestoreProject, onLogout, onApiC
     publishFailed: language === "en" ? "Failed to publish work." : "作品发布失败",
     avatarAlt: language === "en" ? "Avatar" : "头像",
     defaultConfigured: language === "en" ? "System default configuration is active" : "已使用服务端默认配置",
-    baseUrl: language === "en" ? "Base URL" : "接口地址",
+    textBaseUrl: language === "en" ? "Text API" : "文本接口",
+    imageBaseUrl: language === "en" ? "Image API" : "图片接口",
     defaultTextModel: language === "en" ? "Default text model" : "默认文本模型",
     defaultImageModel: language === "en" ? "Default image model" : "默认图片模型",
     visionModel: language === "en" ? "Vision model" : "主体识别模型",
     notConfiguredSeparately: language === "en" ? "Not separately configured" : "未单独配置",
-    envMissingDetail: language === "en" ? "Server environment keys are missing. Fill in the API keys below." : "服务端未配置环境变量密钥（AI_API_KEY / ARK_API_KEY / OPENAI_API_KEY），请手动填写下方的 API Key。",
+    envMissingDetail: language === "en" ? "Server environment keys are missing. Fill in a DeepSeek or Ark API key below." : "服务端未配置 DeepSeek 或 Ark 密钥，请手动填写下方的 API Key。",
     textModel: language === "en" ? "Text Model" : "文本模型",
     imageModel: language === "en" ? "Image Model" : "生图模型",
     visionModelLabel: language === "en" ? "Vision Model" : "图像理解模型",
@@ -542,9 +546,10 @@ export default function ProfilePage({ onBack, onRestoreProject, onLogout, onApiC
             <div className="mt-4 rounded-md border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-800">
               <p className="font-medium">✓ {text.defaultConfigured}</p>
               <ul className="mt-1 space-y-1 text-xs text-emerald-700">
-                {envConfig.baseUrl && <li>{text.baseUrl}: <code className="rounded bg-emerald-100 px-1">{envConfig.baseUrl}</code></li>}
-                {envConfig.defaultTextModel && <li>{text.defaultTextModel}: <code className="rounded bg-emerald-100 px-1">{envConfig.defaultTextModel}</code></li>}
-                {envConfig.defaultImageModel && <li>{text.defaultImageModel}: <code className="rounded bg-emerald-100 px-1">{envConfig.defaultImageModel}</code></li>}
+                {envConfig.textConfigured && <li>{text.textBaseUrl}: <code className="rounded bg-emerald-100 px-1">{envConfig.textBaseUrl}</code></li>}
+                {envConfig.imageConfigured && <li>{text.imageBaseUrl}: <code className="rounded bg-emerald-100 px-1">{envConfig.imageBaseUrl}</code></li>}
+                {envConfig.textConfigured && <li>{text.defaultTextModel}: <code className="rounded bg-emerald-100 px-1">{envConfig.defaultTextModel}</code></li>}
+                {envConfig.imageConfigured && <li>{text.defaultImageModel}: <code className="rounded bg-emerald-100 px-1">{envConfig.defaultImageModel}</code></li>}
                 <li>{text.visionModel}: <code className="rounded bg-emerald-100 px-1">{envConfig.defaultVisionModel || envConfig.defaultTextModel || text.notConfiguredSeparately}</code></li>
               </ul>
             </div>
@@ -566,7 +571,7 @@ export default function ProfilePage({ onBack, onRestoreProject, onLogout, onApiC
                   disabled={apiConfig.useDefaultModel}
                 >
                   <option value="" disabled>{text.selectPlaceholder}</option>
-                  {TEXT_MODEL_OPTIONS.map(m => <option key={m.name} value={m.name}>{m.icon} {m.name}</option>)}
+                  {TEXT_MODEL_OPTIONS.map(m => <option key={m.name} value={m.name}>{m.icon} {m.label ?? m.name}</option>)}
                 </select>
               </div>
               {!apiConfig.useDefaultModel && (
@@ -595,7 +600,7 @@ export default function ProfilePage({ onBack, onRestoreProject, onLogout, onApiC
                   disabled={apiConfig.useDefaultModel}
                 >
                   <option value="" disabled>{text.selectPlaceholder}</option>
-                  {IMAGE_MODEL_OPTIONS.map(m => <option key={m.name} value={m.name}>{m.icon} {m.name}</option>)}
+                  {IMAGE_MODEL_OPTIONS.map(m => <option key={m.name} value={m.name}>{m.icon} {m.label ?? m.name}</option>)}
                 </select>
               </div>
               {!apiConfig.useDefaultModel && (

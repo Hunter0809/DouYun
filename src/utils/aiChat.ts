@@ -14,7 +14,7 @@ export const AI_CHAT_MODE_KEY = "douyun_ai_chat_mode";
 const AI_CHAT_DB_NAME = "douyun_ai_chat_db";
 const AI_CHAT_DB_VERSION = 1;
 const AI_CHAT_STORE_NAME = "chat";
-const CHAT_CONTEXT_LIMIT = 10;
+const CHAT_CONTEXT_LIMIT = 20;
 const HISTORY_LIMIT = 30;
 
 let serverEnvConfigured: boolean | null = null;

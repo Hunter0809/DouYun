@@ -25,7 +25,15 @@ type Props = {
 };
 
 function renderInlineMarkdown(text: string): ReactNode {
-  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, index) => {
+  return text.split(/(\[[^\]]+\]\(https?:\/\/[^)\s]+\)|\*\*[^*]+\*\*|`[^`]+`)/g).map((part, index) => {
+    const link = part.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/);
+    if (link) {
+      return (
+        <a key={index} href={link[2]} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">
+          {link[1]}
+        </a>
+      );
+    }
     if (part.startsWith("**") && part.endsWith("**")) {
       return <strong key={index}>{part.slice(2, -2)}</strong>;
     }

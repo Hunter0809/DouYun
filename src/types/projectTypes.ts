@@ -11,27 +11,17 @@ export interface ApiConfig {
   useDefaultModel?: boolean;
 }
 
-/** 文本模型选项，附带购买链接 */
-export const TEXT_MODEL_OPTIONS: { name: string; icon: string; purchaseUrl: string }[] = [
-  { name: "GPT-4o", icon: "🤖", purchaseUrl: "https://platform.openai.com/api-keys" },
-  { name: "GPT-4o-mini", icon: "🤖", purchaseUrl: "https://platform.openai.com/api-keys" },
-  { name: "Claude 3.5 Sonnet", icon: "🧠", purchaseUrl: "https://console.anthropic.com/" },
-  { name: "Claude 3 Haiku", icon: "🧠", purchaseUrl: "https://console.anthropic.com/" },
-  { name: "Gemini 1.5 Pro", icon: "✨", purchaseUrl: "https://aistudio.google.com/apikey" },
-  { name: "DeepSeek-V3", icon: "🦈", purchaseUrl: "https://platform.deepseek.com/api_keys" },
-  { name: "Qwen2.5-72B", icon: "🐉", purchaseUrl: "https://help.aliyun.com/document_detail/2712195.html" },
-  { name: "GLM-4-Plus", icon: "📐", purchaseUrl: "https://open.bigmodel.cn/" },
+type ModelOption = { name: string; label: string; icon: string; purchaseUrl: string };
+
+/** Models backed by the server's configured OpenAI-compatible providers. */
+export const TEXT_MODEL_OPTIONS: ModelOption[] = [
+  { name: "deepseek-v4-flash", label: "DeepSeek V4 Flash", icon: "🦈", purchaseUrl: "https://platform.deepseek.com/api_keys" },
+  { name: "doubao-seed-2-1-pro-260915", label: "豆包 Seed 2.1 Pro", icon: "✨", purchaseUrl: "https://console.volcengine.com/ark" },
 ];
 
 /** 图片生成模型选项，附带购买链接 */
-export const IMAGE_MODEL_OPTIONS: { name: string; icon: string; purchaseUrl: string }[] = [
-  { name: "DALL·E 3", icon: "🎨", purchaseUrl: "https://platform.openai.com/api-keys" },
-  { name: "Stable Diffusion 3", icon: "🌟", purchaseUrl: "https://platform.stability.ai/api-keys" },
-  { name: "Midjourney", icon: "🌈", purchaseUrl: "https://www.midjourney.com/account" },
-  { name: "FLUX.1 Pro", icon: "🔥", purchaseUrl: "https://bfl.ml/" },
-  { name: "CogView-4", icon: "🖌️", purchaseUrl: "https://platform.volces.com/" },
-  { name: "Minimax", icon: "🎭", purchaseUrl: "https://www.minimaxi.com/" },
-  { name: "Seedance", icon: "🌱", purchaseUrl: "https://console.volcengine.com/" },
+export const IMAGE_MODEL_OPTIONS: ModelOption[] = [
+  { name: "doubao-seedream-4-0-250828", label: "Seedream 4.0", icon: "🎨", purchaseUrl: "https://console.volcengine.com/ark" },
 ];
 
 /** 项目历史记录 */
