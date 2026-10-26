@@ -52,7 +52,7 @@ const WEB_SEARCH_TOOL = {
   },
 };
 
-const MAX_SEARCH_ROUNDS = 1;
+const MAX_SEARCH_ROUNDS = 3;
 
 function getCurrentDateInChina(): string {
   return new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai" }).format(new Date());
