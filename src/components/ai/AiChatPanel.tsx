@@ -207,9 +207,12 @@ export default function AiChatPanel({ isOpen = true, onClose, resetToken = 0, em
         nextMessages,
         mode,
         (content) => {
+          const placeholder = mode === "image" ? ui.generating : ui.thinking;
           persistMessages((prev) =>
             prev.map((item, index) => (
-              index === assistantIndex ? { ...item, content } : item
+              index === assistantIndex
+                ? { ...item, content: item.content === placeholder ? content : item.content + content }
+                : item
             )),
           );
         },

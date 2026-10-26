@@ -263,6 +263,58 @@ async function assertConfigured(mode: ChatMode): Promise<void> {
   throw new Error(`请先在设置中配置${mode === "image" ? "生图模型" : "文本模型"} API 信息`);
 }
 
+async function consumeTextStream(response: Response, onDelta: (delta: string) => void): Promise<string> {
+  if (!response.body) throw new Error("豆韵AI 未返回流式响应");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let content = "";
+
+  const processEvent = (event: string) => {
+    const payload = event
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n")
+      .trim();
+    if (!payload) return;
+
+    let data: { type?: string; content?: string; error?: string };
+    try {
+      data = JSON.parse(payload) as { type?: string; content?: string; error?: string };
+    } catch {
+      return;
+    }
+
+    if (data.type === "error") throw new Error(data.error ?? "豆韵AI 对话请求失败");
+    if (data.type === "delta" && typeof data.content === "string" && data.content.length > 0) {
+      content += data.content;
+      onDelta(data.content);
+    }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      buffer = buffer.replace(/\r\n/g, "\n");
+      let separator = buffer.indexOf("\n\n");
+      while (separator >= 0) {
+        processEvent(buffer.slice(0, separator));
+        buffer = buffer.slice(separator + 2);
+        separator = buffer.indexOf("\n\n");
+      }
+      if (done) break;
+    }
+    if (buffer.trim()) processEvent(buffer);
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (!content.trim()) throw new Error("豆韵AI 对话接口未返回文本内容");
+  return content;
+}
+
 export async function streamChatMessage(
   messages: ChatMessage[],
   mode: ChatMode,
@@ -285,12 +337,13 @@ export async function streamChatMessage(
     signal,
   });
 
-  const result = await response.json().catch(() => null);
   if (!response.ok) {
+    const result = await response.json().catch(() => null);
     throw new Error(result?.error ?? `豆韵AI${mode === "image" ? "生图" : "对话"}请求失败`);
   }
 
   if (mode === "image") {
+    const result = await response.json().catch(() => null);
     if (typeof result?.imageUrl !== "string" || result.imageUrl.length === 0) {
       throw new Error(result?.error ?? "豆韵AI 未返回图片");
     }
@@ -299,12 +352,7 @@ export async function streamChatMessage(
     return "已生成图像：";
   }
 
-  if (typeof result?.content !== "string" || result.content.trim().length === 0) {
-    throw new Error(result?.error ?? "豆韵AI 未返回文本内容");
-  }
-
-  onDelta(result.content);
-  return result.content;
+  return consumeTextStream(response, onDelta);
 }
 
 export async function sendChatMessage(

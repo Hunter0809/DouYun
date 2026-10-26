@@ -102,21 +102,6 @@ function buildTextMessages(messages: unknown): ChatMessage[] {
     }));
 }
 
-function extractAssistantText(content: unknown): string {
-  if (typeof content === "string") return content.trim();
-  if (Array.isArray(content)) {
-    return content
-      .map((item) => {
-        if (typeof item === "string") return item;
-        if (typeof item?.text === "string") return item.text;
-        return "";
-      })
-      .join("\n")
-      .trim();
-  }
-  return "";
-}
-
 function getLanguageInstruction(language: RequestConfig["language"]): string {
   return language === "en"
     ? "Always answer in natural English unless the user explicitly asks for another language."
@@ -171,61 +156,207 @@ async function searchWeb(query: string, requestSignal: AbortSignal): Promise<Arr
   const normalizedQuery = query.trim().slice(0, 200);
   if (!normalizedQuery) throw new Error("搜索关键词不能为空。");
 
-  const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(normalizedQuery)}`;
-  const response = await fetch(searchUrl, {
-    headers: { "User-Agent": "Mozilla/5.0 (compatible; DouYunAI/1.0)", Accept: "text/html" },
-    signal: AbortSignal.any([requestSignal, AbortSignal.timeout(10_000)]),
-  });
-  if (!response.ok) throw new Error(`网页搜索服务返回 ${response.status}。`);
+  const providers = [
+    {
+      name: "Bing",
+      url: `https://www.bing.com/search?q=${encodeURIComponent(normalizedQuery)}&setlang=zh-hans&cc=CN`,
+      parse: parseBingResults,
+    },
+    {
+      name: "DuckDuckGo Lite",
+      url: `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(normalizedQuery)}`,
+      parse: parseDuckDuckGoLiteResults,
+    },
+  ];
+  const failures: string[] = [];
 
-  const html = await response.text();
+  for (const provider of providers) {
+    try {
+      const response = await fetch(provider.url, {
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; DouYunAI/1.0)", Accept: "text/html" },
+        signal: AbortSignal.any([requestSignal, AbortSignal.timeout(8_000)]),
+      });
+      if (!response.ok) {
+        failures.push(`${provider.name} 返回 ${response.status}`);
+        continue;
+      }
+      const results = provider.parse(await response.text());
+      if (results.length > 0) return results;
+      failures.push(`${provider.name} 未返回结果`);
+    } catch (error) {
+      if (requestSignal.aborted) throw error;
+      failures.push(`${provider.name} 请求失败`);
+    }
+  }
+
+  throw new Error(`网页搜索不可用（${failures.join("；")}），请稍后重试。`);
+}
+
+function toSearchResults(
+  links: Array<{ title: string; url: string }>,
+  snippets: string[],
+): Array<{ title: string; url: string; snippet: string }> {
+  return links.slice(0, 5).map((link, index) => ({
+    title: link.title.slice(0, 200),
+    url: link.url,
+    snippet: (snippets[index] ?? "").slice(0, 500),
+  }));
+}
+
+function parseBingResults(html: string): Array<{ title: string; url: string; snippet: string }> {
+  const links: Array<{ title: string; url: string }> = [];
+  const snippets: string[] = [];
+  for (const match of html.matchAll(/<li\b([^>]*)>([\s\S]*?)<\/li>/gi)) {
+    if (!/\bb_algo\b/.test(match[1])) continue;
+    const block = match[2];
+    const titleMatch = block.match(/<h2[^>]*>\s*<a\b([^>]*)>([\s\S]*?)<\/a>\s*<\/h2>/i);
+    const href = titleMatch?.[1].match(/\bhref=["']([^"']+)["']/i)?.[1];
+    const url = href ? resolveSearchUrl(href) : null;
+    const title = titleMatch ? decodeHtml(titleMatch[2]) : "";
+    if (!url || !title) continue;
+    links.push({ title, url });
+    snippets.push(decodeHtml(block.match(/<p\b[^>]*>([\s\S]*?)<\/p>/i)?.[1] ?? ""));
+  }
+  return toSearchResults(links, snippets);
+}
+
+function parseDuckDuckGoLiteResults(html: string): Array<{ title: string; url: string; snippet: string }> {
   const links: Array<{ title: string; url: string }> = [];
   const snippets: string[] = [];
   for (const match of html.matchAll(/<a\b([^>]+)>([\s\S]*?)<\/a>/gi)) {
     const attrs = match[1];
     const className = attrs.match(/\bclass=["']([^"']+)["']/i)?.[1] ?? "";
-    if (/\bresult__a\b/.test(className)) {
-      const rawUrl = attrs.match(/\bhref=["']([^"']+)["']/i)?.[1];
-      const url = rawUrl ? resolveSearchUrl(rawUrl) : null;
-      const title = decodeHtml(match[2]);
-      if (url && title) links.push({ title, url });
-    } else if (/\bresult__snippet\b/.test(className)) {
-      snippets.push(decodeHtml(match[2]));
-    }
+    if (!/\bresult-link\b/.test(className)) continue;
+    const href = attrs.match(/\bhref=["']([^"']+)["']/i)?.[1];
+    const url = href ? resolveSearchUrl(href) : null;
+    const title = decodeHtml(match[2]);
+    if (url && title) links.push({ title, url });
   }
-
-  const results = links.slice(0, 5).map((link, index) => ({
-    ...link,
-    snippet: snippets[index] ?? "",
-  }));
-  if (results.length === 0) throw new Error("网页搜索没有返回可用结果，请稍后重试。");
-  return results;
+  for (const match of html.matchAll(/<td\b([^>]+)>([\s\S]*?)<\/td>/gi)) {
+    const className = match[1].match(/\bclass=["']([^"']+)["']/i)?.[1] ?? "";
+    if (/\bresult-snippet\b/.test(className)) snippets.push(decodeHtml(match[2]));
+  }
+  return toSearchResults(links, snippets);
 }
 
-function readToolCalls(value: unknown): ToolCall[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    const record = asRecord(item);
-    const fn = asRecord(record?.function);
-    if (
-      typeof record?.id !== "string"
-      || record.type !== "function"
-      || typeof fn?.name !== "string"
-      || typeof fn.arguments !== "string"
-    ) return [];
-    return [{
-      id: record.id,
-      type: "function" as const,
-      function: { name: fn.name, arguments: fn.arguments },
-    }];
+type ProviderStreamResult = { content: string; toolCalls: ToolCall[] };
+
+async function streamProviderCompletion(
+  options: {
+    apiKey: string;
+    baseUrl: string;
+    model: string;
+    messages: ProviderMessage[];
+    useDeepSeek: boolean;
+    includeTools: boolean;
+    signal: AbortSignal;
+    language: RequestConfig["language"];
+  },
+  onDelta: (content: string) => void,
+): Promise<ProviderStreamResult> {
+  const response = await fetch(`${options.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${options.apiKey}`,
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify({
+      model: options.model,
+      messages: options.messages,
+      stream: true,
+      ...(options.includeTools ? { tools: [WEB_SEARCH_TOOL], tool_choice: "auto" } : {}),
+      ...(options.useDeepSeek ? { thinking: { type: "disabled" } } : {}),
+    }),
+    signal: options.signal,
   });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(formatUpstreamError(
+      detail,
+      localizedError(options.language, "豆韵AI 对话请求失败", "DouYun AI chat request failed"),
+    ));
+  }
+  if (!response.body) throw new Error("AI 服务未返回流式响应。");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const toolCalls = new Map<number, ToolCall>();
+  let buffer = "";
+  let content = "";
+
+  const processEvent = (event: string) => {
+    const payload = event
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n")
+      .trim();
+    if (!payload) return;
+    if (payload === "[DONE]") return;
+
+    let chunk: Record<string, unknown> | null = null;
+    try {
+      chunk = asRecord(JSON.parse(payload));
+    } catch {
+      return;
+    }
+    const choices = Array.isArray(chunk?.choices) ? chunk.choices : [];
+    const choice = asRecord(choices[0]);
+    const delta = asRecord(choice?.delta);
+    if (typeof delta?.content === "string" && delta.content.length > 0) {
+      content += delta.content;
+      onDelta(delta.content);
+    }
+
+    if (!Array.isArray(delta?.tool_calls)) return;
+    for (const item of delta.tool_calls) {
+      const record = asRecord(item);
+      if (!record) continue;
+      const index = typeof record.index === "number" ? record.index : toolCalls.size;
+      const existing = toolCalls.get(index) ?? {
+        id: "",
+        type: "function" as const,
+        function: { name: "", arguments: "" },
+      };
+      const fn = asRecord(record.function);
+      if (typeof record.id === "string") existing.id = record.id;
+      if (typeof fn?.name === "string") existing.function.name += fn.name;
+      if (typeof fn?.arguments === "string") existing.function.arguments += fn.arguments;
+      toolCalls.set(index, existing);
+    }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      buffer = buffer.replace(/\r\n/g, "\n");
+      let separator = buffer.indexOf("\n\n");
+      while (separator >= 0) {
+        processEvent(buffer.slice(0, separator));
+        buffer = buffer.slice(separator + 2);
+        separator = buffer.indexOf("\n\n");
+      }
+      if (done) break;
+    }
+    if (buffer.trim()) processEvent(buffer);
+  } finally {
+    reader.releaseLock();
+  }
+
+  return {
+    content,
+    toolCalls: Array.from(toolCalls.values()).filter((toolCall) => toolCall.id && toolCall.function.name),
+  };
 }
 
 async function handleTextChat(
   messages: unknown,
   config: RequestConfig | undefined,
   requestSignal: AbortSignal,
-) {
+): Promise<Response> {
   const language = config?.language === "en" ? "en" : "zh";
   const selectedModel = firstConfiguredValue(config?.textModelName);
   const useDefaultModel = config?.useDefaultModel === true;
@@ -280,89 +411,100 @@ async function handleTextChat(
     ...normalizedMessages.map((message) => ({ ...message, content: message.content })),
   ];
   const requestDeadline = AbortSignal.any([requestSignal, AbortSignal.timeout(55_000)]);
-
-  for (let round = 0; round <= MAX_SEARCH_ROUNDS; round += 1) {
-    let response: Response;
-    try {
-      response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: conversation,
-          ...(round < MAX_SEARCH_ROUNDS ? { tools: [WEB_SEARCH_TOOL], tool_choice: "auto" } : {}),
-          ...(useDeepSeek ? { thinking: { type: "disabled" } } : {}),
-        }),
-        signal: requestDeadline,
-      });
-    } catch {
-      const timedOut = requestDeadline.aborted && !requestSignal.aborted;
-      return NextResponse.json({
-        error: localizedError(
-          language,
-          timedOut ? "AI 请求超时，请稍后重试。" : "无法连接 AI 服务，请检查网络后重试。",
-          timedOut ? "The AI request timed out. Please try again." : "Could not connect to the AI service. Check the network and try again.",
-        ),
-      }, { status: timedOut ? 504 : 502 });
-    }
-
-    if (!response.ok) {
-      const detail = await response.text();
-      return NextResponse.json(
-        {
-          error: formatUpstreamError(
-            detail,
-            localizedError(language, "豆韵AI 对话请求失败", "DouYun AI chat request failed"),
-          ),
-        },
-        { status: response.status >= 400 && response.status < 500 ? response.status : 502 },
-      );
-    }
-
-    const result = asRecord(await response.json().catch(() => null));
-    const choices = Array.isArray(result?.choices) ? result.choices : [];
-    const choice = asRecord(choices[0]);
-    const message = asRecord(choice?.message);
-    const content = extractAssistantText(message?.content);
-    const toolCalls = readToolCalls(message?.tool_calls).slice(0, 1);
-
-    if (toolCalls.length === 0) {
-      if (content) return NextResponse.json({ content });
-      return NextResponse.json({
-        error: localizedError(language, "豆韵AI 对话接口未返回文本内容。", "DouYun AI did not return text content."),
-      }, { status: 502 });
-    }
-
-    if (round === MAX_SEARCH_ROUNDS) break;
-    conversation.push({ role: "assistant", content: content || null, tool_calls: toolCalls });
-
-    for (const toolCall of toolCalls) {
-      let toolResult: unknown;
-      if (toolCall.function.name !== "web_search") {
-        toolResult = { error: "Unknown tool." };
-      } else {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      let closed = false;
+      const emit = (event: Record<string, unknown>) => {
+        if (closed) return;
         try {
-          const args = JSON.parse(toolCall.function.arguments) as { query?: unknown };
-          if (typeof args.query !== "string") throw new Error("搜索关键词格式无效。");
-          toolResult = await searchWeb(args.query, requestDeadline);
-        } catch (error) {
-          toolResult = { error: error instanceof Error ? error.message : "网页搜索失败。" };
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        } catch {
+          closed = true;
         }
-      }
-      conversation.push({
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: JSON.stringify(toolResult),
-      });
-    }
-  }
+      };
 
-  return NextResponse.json({
-    error: localizedError(language, "联网搜索步骤未能完成，请缩短问题后重试。", "The web search flow did not complete. Please try a shorter question."),
-  }, { status: 502 });
+      const run = async () => {
+        try {
+          for (let round = 0; round <= MAX_SEARCH_ROUNDS; round += 1) {
+            const result = await streamProviderCompletion({
+              apiKey,
+              baseUrl,
+              model,
+              messages: conversation,
+              useDeepSeek,
+              includeTools: round < MAX_SEARCH_ROUNDS,
+              signal: requestDeadline,
+              language,
+            }, (content) => emit({ type: "delta", content }));
+
+            if (result.toolCalls.length === 0) {
+              if (!result.content.trim()) {
+                emit({
+                  type: "error",
+                  error: localizedError(language, "豆韵AI 对话接口未返回文本内容。", "DouYun AI did not return text content."),
+                });
+              }
+              return;
+            }
+
+            if (round === MAX_SEARCH_ROUNDS) {
+              emit({
+                type: "error",
+                error: localizedError(language, "联网搜索步骤未能完成，请缩短问题后重试。", "The web search flow did not complete. Please try a shorter question."),
+              });
+              return;
+            }
+
+            const toolCalls = result.toolCalls.slice(0, 1);
+            conversation.push({ role: "assistant", content: result.content || null, tool_calls: toolCalls });
+            for (const toolCall of toolCalls) {
+              let toolResult: unknown;
+              if (toolCall.function.name !== "web_search") {
+                toolResult = { error: "Unknown tool." };
+              } else {
+                try {
+                  const args = JSON.parse(toolCall.function.arguments) as { query?: unknown };
+                  if (typeof args.query !== "string") throw new Error("搜索关键词格式无效。");
+                  toolResult = await searchWeb(args.query, requestDeadline);
+                } catch (error) {
+                  toolResult = { error: error instanceof Error ? error.message : "网页搜索失败。" };
+                }
+              }
+              conversation.push({ role: "tool", tool_call_id: toolCall.id, content: JSON.stringify(toolResult) });
+            }
+          }
+        } catch {
+          const timedOut = requestDeadline.aborted && !requestSignal.aborted;
+          emit({
+            type: "error",
+            error: localizedError(
+              language,
+              timedOut ? "AI 请求超时，请稍后重试。" : "AI 对话连接失败，请检查服务配置后重试。",
+              timedOut ? "The AI request timed out. Please try again." : "The AI chat request failed. Check the service configuration and try again.",
+            ),
+          });
+        } finally {
+          emit({ type: "done" });
+          if (!closed) {
+            closed = true;
+            controller.close();
+          }
+        }
+      };
+
+      void run();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }
 
 async function handleImageGeneration(messages: unknown, config: RequestConfig | undefined) {
